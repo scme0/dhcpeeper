@@ -5,17 +5,18 @@ import (
 	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/mdlayher/raw"
+	"github.com/mdlayher/packet"
 	"log"
 	"math/rand"
 	"net"
 	"os"
+	"strconv"
 	"time"
 )
 
 func init() {
 	flag.Usage = func() {
-		fmt.Printf("syntax: %s [flags] IFNAME\n", os.Args[0])
+		fmt.Printf("syntax: %s [flags] IFNAME timout-in-seconds\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	//flag.Var(&options, "option", "custom DHCP option for the request (code,value)")
@@ -32,10 +33,16 @@ func main() {
 func start() (err error) {
 	flag.Parse()
 
-	if flag.NArg() != 1 {
+	if flag.NArg() != 2 {
 		flag.Usage()
 		os.Exit(1)
 	}
+
+	timeoutSeconds, err := strconv.Atoi(flag.Arg(1))
+	if err != nil {
+		return err
+	}
+	timeout := time.Duration(timeoutSeconds) * time.Second
 
 	ifname := flag.Arg(0)
 	iface, err := net.InterfaceByName(ifname)
@@ -43,14 +50,14 @@ func start() (err error) {
 		return
 	}
 
-	conn, err := raw.ListenPacket(iface, uint16(layers.EthernetTypeIPv4), nil)
+	conn, err := packet.Listen(iface, packet.Raw, int(layers.EthernetTypeIPv4), nil)
 	if err != nil {
 		return
 	}
 
 	xid := rand.Uint32()
 
-	toSend := newPacket(layers.DHCPMsgTypeInform, iface.HardwareAddr, xid)
+	toSend := newPacket(layers.DHCPMsgTypeDiscover, iface.HardwareAddr, xid)
 
 	log.Printf("sending packet")
 	err = sendMulticast(conn, toSend, iface.HardwareAddr)
@@ -58,13 +65,13 @@ func start() (err error) {
 		return
 	}
 
-	received, err := waitForResponse(conn, xid, 30*time.Second)
+	received, err := waitForResponse(conn, xid, timeout)
 	if err != nil {
 		return
 	}
 
 	if received != nil {
-		log.Printf("received packet %o", received)
+		log.Printf("received packet client: %s, server: %s", received.YourClientIP.String(), received.NextServerIP.String())
 	}
 
 	defer func() {
@@ -90,7 +97,7 @@ func newPacket(msgType layers.DHCPMsgType, addr net.HardwareAddr, xid uint32) *l
 	return &pack
 }
 
-func sendMulticast(conn *raw.Conn, dhcp *layers.DHCPv4, addr net.HardwareAddr) error {
+func sendMulticast(conn *packet.Conn, dhcp *layers.DHCPv4, addr net.HardwareAddr) error {
 	eth := layers.Ethernet{
 		EthernetType: layers.EthernetTypeIPv4,
 		SrcMAC:       addr,
@@ -124,12 +131,12 @@ func sendMulticast(conn *raw.Conn, dhcp *layers.DHCPv4, addr net.HardwareAddr) e
 	}
 
 	// Send packet
-	_, err = conn.WriteTo(buf.Bytes(), &raw.Addr{HardwareAddr: eth.DstMAC})
+	_, err = conn.WriteTo(buf.Bytes(), &packet.Addr{HardwareAddr: eth.DstMAC})
 	return err
 }
 
 // waitForResponse waits for a DHCP packet with matching transaction ID and the given message type
-func waitForResponse(conn *raw.Conn, xid uint32, timeout time.Duration) (*layers.DHCPv4, error) {
+func waitForResponse(conn *packet.Conn, xid uint32, timeout time.Duration) (*layers.DHCPv4, error) {
 	err := conn.SetReadDeadline(time.Now().Add(timeout))
 	if err != nil {
 		return nil, err
